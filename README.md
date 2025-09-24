@@ -3,6 +3,7 @@
 **Made in collaboration with teammates for PennApps XXVI hackathon - Winner of Best Use of Gemini API 🏆**
 
 *Your AI efficiency, rewarded.*
+
 **Devpost**: [CarbonSight on Devpost](https://devpost.com/software/carbonsight)
 
 ---
