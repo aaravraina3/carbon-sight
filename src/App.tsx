@@ -70,6 +70,7 @@ class ErrorBoundary extends React.Component<{ children: React.ReactNode }, { err
 /* ---------------- Supabase (guarded) ---------------- */
 const SUPA_URL = (import.meta as any).env?.VITE_SUPABASE_URL as string | undefined;
 const SUPA_ANON = (import.meta as any).env?.VITE_SUPABASE_ANON_KEY as string | undefined;
+const APP_URL = (import.meta as any).env?.VITE_PUBLIC_APP_URL as string | undefined;
 const MISSING_ENV = !SUPA_URL || !SUPA_ANON;
 
 console.log("[App] VITE_SUPABASE_URL present:", Boolean(SUPA_URL));
@@ -141,8 +142,8 @@ function AuthProvider({ children }: { children: React.ReactNode }) {
     const { data, error } = await supabase.auth.signInWithOtp({
       email: email,
       options: {
-        shouldCreateUser: true,
-        emailRedirectTo: undefined, // Disable magic link redirect
+        // Ensure magic link redirects to current origin (works in prod and local)
+        emailRedirectTo: `${window.location.origin.replace(/\/$/, '')}/chat`,
       }
     });
     
@@ -217,7 +218,11 @@ function AuthProvider({ children }: { children: React.ReactNode }) {
       console.log("[Auth] Exception storing user data:", err);
     }
   }
-  async function logout() { if (supabase) await supabase.auth.signOut(); }
+  async function logout() {
+    if (supabase) await supabase.auth.signOut();
+    try { localStorage.removeItem("cs.guest"); } catch {}
+    try { window.location.assign("/"); } catch {}
+  }
 
   const value = useMemo(() => ({ session, user: session?.user ?? null, checkEmailExists, sendOTP, verifyOTP, logout }), [session]);
   return <Auth.Provider value={value}>{children}</Auth.Provider>;
@@ -446,7 +451,7 @@ const WEB_MODELS: { id: string; label: string; energy: "sustainable" | "balanced
   { id: "gemini-2.5-flash-lite",       label: "gemini-2.5-flash-lite (Balanced)", energy: "balanced" },
   { id: "gemini-2.5-pro",        label: "gemini-2.5-pro (Intensive)", energy: "intensive" },
 
-  // some extras to make the graph feel “neural”
+  // some extras to make the graph feel "neural"
   { id: "gpt-4o-mini",   label: "gpt-4o-mini", energy: "balanced" },
   { id: "llama-3-8b",    label: "Llama 3 8B", energy: "sustainable" },
   { id: "mistral-large", label: "Mistral Large", energy: "balanced" },
@@ -484,9 +489,6 @@ function HomePage() {
           >
             Try Chat (demo)
           </Link>
-          <Button onClick={() => setOpen(true)}>
-            <LogIn className="h-4 w-4" /> Login
-          </Button>
         </div>
       </header>
 
@@ -633,7 +635,7 @@ function HomePage() {
 
       </main>
 
-      {open && <LoginModal onClose={() => setOpen(false)} />}
+      {/* Login removed */}
 
 
 {/* MODEL ENERGY NETWORK (full-bleed, large) */}
@@ -1096,7 +1098,15 @@ const GEMINI_BASELINES: BaselineRow[] = [
 
 /** If you want to scale by prompt length, you can; for now we just return baselines. */
 function estimateForPrompt(_text: string): EstRow[] {
-  return GEMINI_BASELINES;
+  // Map static baselines into EstRow shape
+  return GEMINI_BASELINES.map((b) => ({
+    modelId: b.model,
+    model: b.model,
+    costUSD: +b.costUsdPer1k.toFixed(4),
+    co2kg: +b.co2Per1k.toFixed(4),
+    latencyMs: +b.latencyMsP95.toFixed(2),
+    tokens: 1000,
+  }));
 }
 function ChatScreen() {
   const { user, logout } = useAuth();
@@ -1159,7 +1169,7 @@ const [infoFor, setInfoFor] = useState<number | null>(null);
   // Add user message and capture its index
   setMessages((prev) => {
     const myIndex = prev.length; // this user's message will be at this index
-    const next = [...prev, { role: "user", content: text }];
+    const next = [...prev, { role: "user" as const, content: text }];
 
     // compute analysis rows for this prompt (front-end demo)
     const rows = estimateForPrompt(text);
@@ -1181,9 +1191,34 @@ const [infoFor, setInfoFor] = useState<number | null>(null);
     playedColorsRef.current.add(effectColor);
   }
 
-  // Demo assistant reply
-  const reply = `(${currentModel.label}) I've analyzed your prompt for carbon emissions across different Gemini models. The data is shown via the ⓘ button next to your message.`;
-  setTimeout(() => setMessages((m) => [...m, { role: "assistant", content: reply }]), 350);
+  // Demo assistant reply (dynamic per prompt using local estimation)
+  const metricsForModel = (() => {
+    const rows = computeRows(text);
+    return rows.find(r => r.modelId === currentModel.id) ?? rows[0];
+  })();
+  // Immediate fallback assistant reply so the user always sees a response
+  const fallbackReply = `(${currentModel.label}) Estimated for your prompt: ~${metricsForModel.tokens} tokens • $${metricsForModel.costUSD.toFixed(4)} • ${metricsForModel.co2kg.toFixed(4)} kg CO₂ • ~${metricsForModel.latencyMs.toFixed(0)} ms.`;
+  setMessages((m) => [...m, { role: 'assistant', content: fallbackReply }]);
+  // Kick off serverless call to Gemini for real text
+  void (async () => {
+    try {
+      const res = await fetch('/api/chat', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ prompt: text, model: currentModel.id })
+      });
+      if (!res.ok) throw new Error('Gemini call failed');
+      const data = await res.json();
+      const geminiText = String(data?.text || '').trim();
+      const reply = geminiText
+        ? `${geminiText}\n\n— (${currentModel.label}) est: ~${metricsForModel.tokens} tok • $${metricsForModel.costUSD.toFixed(4)} • ${metricsForModel.co2kg.toFixed(4)} kg CO₂ • ~${metricsForModel.latencyMs.toFixed(0)} ms`
+        : `(${currentModel.label}) Estimated for your prompt: ~${metricsForModel.tokens} tokens • $${metricsForModel.costUSD.toFixed(4)} • ${metricsForModel.co2kg.toFixed(4)} kg CO₂ • ~${metricsForModel.latencyMs.toFixed(0)} ms.`;
+      setMessages((m) => [...m, { role: 'assistant', content: reply }]);
+    } catch {
+      const reply = `(${currentModel.label}) Estimated for your prompt: ~${metricsForModel.tokens} tokens • $${metricsForModel.costUSD.toFixed(4)} • ${metricsForModel.co2kg.toFixed(4)} kg CO₂ • ~${metricsForModel.latencyMs.toFixed(0)} ms.`;
+      setMessages((m) => [...m, { role: 'assistant', content: reply }]);
+    }
+  })();
 }
 
   /* -------- Sidebar state: desktop collapse + mobile overlay -------- */
@@ -1402,7 +1437,13 @@ useEffect(() => {
             </span>
           </span>
           {isSidebarOpen && (
-            <Trash2 className="h-4 w-4 shrink-0 text-slate-500 opacity-0 transition group-hover:opacity-100 hover:text-rose-400" />
+            <button
+              onClick={(e) => { e.stopPropagation(); deleteChat(c.id); }}
+              className="rounded-md p-1 text-slate-500 opacity-0 transition group-hover:opacity-100 hover:text-rose-400 hover:bg-white/10"
+              title="Delete"
+            >
+              <Trash2 className="h-4 w-4 shrink-0" />
+            </button>
           )}
         </button>
       );
@@ -1680,7 +1721,7 @@ function PromptInfoModal({
           <button onClick={onClose} className="rounded-lg px-2 py-1 text-slate-400 hover:text-white">✕</button>
         </div>
 
-        <p className="mb-3 truncate text-sm text-slate-400">“{prompt}”</p>
+        <p className="mb-3 truncate text-sm text-slate-400">"{prompt}"</p>
 
         <div className="overflow-x-auto">
           <table className="w-full text-left text-sm">
@@ -1975,13 +2016,11 @@ function DashboardScreen() {
 
 /* ---------------- Route guard & App ---------------- */
 function Protected({ children }: { children: React.ReactNode }) {
-  const { session } = useAuth();
-  if (!session) return <Navigate to="/" replace />;
   return <>{children}</>;
 }
 
 export default function App() {
-  if (MISSING_ENV) return <MissingEnv />;
+  // Allow app to run even if Supabase env is missing (guest/demo mode)
   return (
     <ErrorBoundary>
       <BrowserRouter>
