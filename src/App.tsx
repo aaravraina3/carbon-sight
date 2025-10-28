@@ -464,6 +464,7 @@ const WEB_MODELS: { id: string; label: string; energy: "sustainable" | "balanced
 /* ---------------- Screen 1: Homepage + Login ---------------- */
 function HomePage() {
   const [open, setOpen] = useState(false);
+  const nav = useNavigate();
 
   // Optional: allow other components to trigger opening the modal
   useEffect(() => {
@@ -525,7 +526,7 @@ function HomePage() {
             transition={{ duration: 0.6, delay: 0.18 }}
             className="mt-8 flex flex-wrap items-center justify-center gap-3"
           >
-            <PrimaryButton onClick={() => setOpen(true)} className="px-5 py-2.5">
+            <PrimaryButton onClick={() => nav("/chat")} className="px-5 py-2.5">
               <LogIn className="h-4 w-4" /> Start Optimizing Now
             </PrimaryButton>
           </motion.div>
@@ -1122,10 +1123,10 @@ function ChatScreen() {
 
     const [uiAutoBest, setUiAutoBest] = useState(false);
 
-  // Per-prompt analysis rows keyed by message index
-const [analyses, setAnalyses] = useState<Record<number, EstRow[]>>({});
-// Which message index is currently showing the info modal
-const [infoFor, setInfoFor] = useState<number | null>(null);
+  // Per-chat → per-message-index analysis rows
+  const [analysesByChat, setAnalysesByChat] = useState<Record<string, Record<number, EstRow[]>>>({ c1: {} });
+  // Which message index is currently showing the info modal
+  const [infoFor, setInfoFor] = useState<number | null>(null);
 
   useEffect(() => {
     burstPlayedRef.current = false;
@@ -1133,29 +1134,42 @@ const [infoFor, setInfoFor] = useState<number | null>(null);
   }, [modelId]);
 
   // Chat state (demo)
+  type ChatMessage = { role: "user" | "assistant"; content: string };
   const [convos, setConvos] = useState<{ id: string; title: string }[]>([{ id: "c1", title: "New chat" }]);
   const [activeId, setActiveId] = useState("c1");
-  const [messages, setMessages] = useState<{ role: "user" | "assistant"; content: string }[]>([
-    { role: "assistant", content: "Hi! Ask me anything about CarbonSight. This is a demo UI." },
-  ]);
+  const [chatsById, setChatsById] = useState<Record<string, ChatMessage[]>>({
+    c1: [{ role: "assistant", content: "Hi! Ask me anything about CarbonSight. This is a demo UI." }],
+  });
   const [input, setInput] = useState("");
   const listRef = useRef<HTMLDivElement>(null);
-  useEffect(() => { listRef.current?.scrollTo({ top: listRef.current.scrollHeight, behavior: "smooth" }); }, [messages]);
+  const messages = useMemo(() => chatsById[activeId] ?? [], [chatsById, activeId]);
+  useEffect(() => { listRef.current?.scrollTo({ top: listRef.current.scrollHeight, behavior: "smooth" }); }, [chatsById, activeId]);
 
   function newChat() {
     const id = Math.random().toString(36).slice(2);
     setConvos((c) => [{ id, title: "New chat" }, ...c]);
+    setChatsById((prev) => ({ ...prev, [id]: [{ role: "assistant", content: "New conversation started." }] }));
     setActiveId(id);
-    setMessages([{ role: "assistant", content: "New conversation started." }]);
     playedColorsRef.current.clear();
   }
 
   function deleteChat(id: string) {
     setConvos((prev) => prev.filter((c) => c.id !== id));
-    if (activeId === id && convos.length > 1) {
-      const next = convos.find((c) => c.id !== id)!;
-      setActiveId(next.id);
-      setMessages([{ role: "assistant", content: "Switched conversation." }]);
+    setChatsById((prev) => {
+      const clone = { ...prev } as Record<string, ChatMessage[]>;
+      delete clone[id];
+      return clone;
+    });
+    if (activeId === id) {
+      const remaining = convos.filter((c) => c.id !== id);
+      if (remaining.length > 0) {
+        setActiveId(remaining[0].id);
+      } else {
+        const nid = Math.random().toString(36).slice(2);
+        setConvos([{ id: nid, title: "New chat" }]);
+        setChatsById({ [nid]: [{ role: "assistant", content: "New conversation started." }] });
+        setActiveId(nid);
+      }
     }
   }
 
@@ -1166,17 +1180,18 @@ const [infoFor, setInfoFor] = useState<number | null>(null);
 
   setInput("");
 
-  // Add user message and capture its index
-  setMessages((prev) => {
-    const myIndex = prev.length; // this user's message will be at this index
-    const next = [...prev, { role: "user" as const, content: text }];
-
-    // compute analysis rows for this prompt (front-end demo)
-    const rows = estimateForPrompt(text);
-    setAnalyses((a) => ({ ...a, [myIndex]: rows }));
-
-    return next;
-  });
+  // Add user message to the active chat and capture its index
+  const current = chatsById[activeId] ?? [];
+  const myIndex = current.length;
+  const rows = estimateForPrompt(text);
+  setChatsById((prev) => ({
+    ...prev,
+    [activeId]: [...(prev[activeId] ?? []), { role: "user", content: text }],
+  }));
+  setAnalysesByChat((prev) => ({
+    ...prev,
+    [activeId]: { ...(prev[activeId] ?? {}), [myIndex]: rows },
+  }));
 
   // (optional) your Supabase insert/analysis call can stay here if you have it
   // try { await insertGeminiToSupabase(text, user?.email ?? ""); } catch {}
@@ -1193,12 +1208,15 @@ const [infoFor, setInfoFor] = useState<number | null>(null);
 
   // Demo assistant reply (dynamic per prompt using local estimation)
   const metricsForModel = (() => {
-    const rows = computeRows(text);
-    return rows.find(r => r.modelId === currentModel.id) ?? rows[0];
+    const rowsLocal = computeRows(text);
+    return rowsLocal.find(r => r.modelId === currentModel.id) ?? rowsLocal[0];
   })();
   // Immediate fallback assistant reply so the user always sees a response
   const fallbackReply = `(${currentModel.label}) Estimated for your prompt: ~${metricsForModel.tokens} tokens • $${metricsForModel.costUSD.toFixed(4)} • ${metricsForModel.co2kg.toFixed(4)} kg CO₂ • ~${metricsForModel.latencyMs.toFixed(0)} ms.`;
-  setMessages((m) => [...m, { role: 'assistant', content: fallbackReply }]);
+  setChatsById((prev) => ({
+    ...prev,
+    [activeId]: [...(prev[activeId] ?? []), { role: 'assistant', content: fallbackReply }],
+  }));
   // Kick off serverless call to Gemini for real text
   void (async () => {
     try {
@@ -1213,10 +1231,16 @@ const [infoFor, setInfoFor] = useState<number | null>(null);
       const reply = geminiText
         ? `${geminiText}\n\n— (${currentModel.label}) est: ~${metricsForModel.tokens} tok • $${metricsForModel.costUSD.toFixed(4)} • ${metricsForModel.co2kg.toFixed(4)} kg CO₂ • ~${metricsForModel.latencyMs.toFixed(0)} ms`
         : `(${currentModel.label}) Estimated for your prompt: ~${metricsForModel.tokens} tokens • $${metricsForModel.costUSD.toFixed(4)} • ${metricsForModel.co2kg.toFixed(4)} kg CO₂ • ~${metricsForModel.latencyMs.toFixed(0)} ms.`;
-      setMessages((m) => [...m, { role: 'assistant', content: reply }]);
+      setChatsById((prev) => ({
+        ...prev,
+        [activeId]: [...(prev[activeId] ?? []), { role: 'assistant', content: reply }],
+      }));
     } catch {
       const reply = `(${currentModel.label}) Estimated for your prompt: ~${metricsForModel.tokens} tokens • $${metricsForModel.costUSD.toFixed(4)} • ${metricsForModel.co2kg.toFixed(4)} kg CO₂ • ~${metricsForModel.latencyMs.toFixed(0)} ms.`;
-      setMessages((m) => [...m, { role: 'assistant', content: reply }]);
+      setChatsById((prev) => ({
+        ...prev,
+        [activeId]: [...(prev[activeId] ?? []), { role: 'assistant', content: reply }],
+      }));
     }
   })();
 }
@@ -1588,7 +1612,7 @@ useEffect(() => {
 {infoFor !== null && (
   <PromptInfoModal
     prompt={messages[infoFor]?.content ?? ""}
-    rows={analyses[infoFor] ?? []}
+    rows={(analysesByChat[activeId] ?? {})[infoFor] ?? []}
     onClose={() => setInfoFor(null)}
   />
 )}
